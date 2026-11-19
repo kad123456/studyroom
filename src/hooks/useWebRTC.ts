@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { db, isFirebaseConfigured } from '@/lib/firebase';
-import { ref, set, onValue, remove, onDisconnect } from 'firebase/database';
+import { ref, set, update, onValue, remove, onDisconnect } from 'firebase/database';
 
 export interface Participant {
   id: string;
@@ -21,6 +21,8 @@ interface UseWebRTCReturn {
   isCameraOff: boolean;
   isScreenSharing: boolean;
   mediaError: string | null;
+  isRequestingMedia: boolean;
+  retryMedia: () => Promise<MediaStream | null>;
   toggleMute: () => void;
   toggleCamera: () => void;
   toggleScreenShare: () => Promise<void>;
@@ -29,12 +31,52 @@ interface UseWebRTCReturn {
   myGoal: string;
 }
 
+const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 1280, max: 1920 },
+  height: { ideal: 720, max: 1080 },
+  facingMode: 'user',
+};
+
+const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+};
+
+function describeMediaError(errors: unknown[]): string {
+  const names = errors
+    .map((error) => (error as { name?: string } | null)?.name)
+    .filter((name): name is string => Boolean(name));
+
+  if (names.includes('NotAllowedError') || names.includes('SecurityError')) {
+    return 'Camera or microphone access is blocked. Click the site controls icon beside the address bar, allow Camera and Microphone, then try again. If they are already allowed, check your device privacy settings.';
+  }
+  if (names.includes('NotFoundError')) {
+    return 'No camera or microphone was found. Connect a device, then try again.';
+  }
+  if (names.includes('NotReadableError') || names.includes('TrackStartError')) {
+    return 'The camera or microphone is busy in another app. Close other apps using it, then try again.';
+  }
+  if (typeof window !== 'undefined' && !window.isSecureContext) {
+    return 'Camera and microphone access needs a secure HTTPS page. Open the room using its HTTPS link.';
+  }
+  return 'Could not start the camera or microphone. Check site permissions and close other apps using the device, then try again.';
+}
+
 export function useWebRTC(roomId: string, displayName: string, initialGoal: string = ''): UseWebRTCReturn {
   const localStreamRef = useRef<MediaStream | null>(null);
   const originalCamTrackRef = useRef<MediaStreamTrack | null>(null);
   const peerRef = useRef<any>(null);
+  const myPeerIdRef = useRef('');
+  const displayNameRef = useRef(displayName);
+  const initialGoalRef = useRef(initialGoal);
+  const mediaRequestRef = useRef<Promise<{ stream: MediaStream | null; changed: boolean }> | null>(null);
+  const peerRestartRef = useRef<Promise<void> | null>(null);
+  const participantUnsubscribeRef = useRef<(() => void) | null>(null);
   const connectionsRef = useRef<Map<string, any>>(new Map());
   const participantsRef = useRef<Map<string, Participant>>(new Map());
+
+  displayNameRef.current = displayName;
+  initialGoalRef.current = initialGoal;
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [participants, setParticipants] = useState<Map<string, Participant>>(new Map());
@@ -43,6 +85,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [isRequestingMedia, setIsRequestingMedia] = useState(false);
   const [myGoal, setMyGoal] = useState(initialGoal);
 
   const updateParticipants = useCallback(() => {
@@ -52,61 +95,64 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
   // Initialize camera and mic
   const initMedia = useCallback(async (): Promise<MediaStream | null> => {
     if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      setMediaError('Camera/Microphone not supported on this device/browser.');
+      setMediaError('Camera and microphone are not available in this browser. Open this room in a supported browser over HTTPS.');
       return null;
     }
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
-          facingMode: 'user',
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
+    setMediaError(null);
 
-      // Default: muted on join for quiet focus (as per StudyStream spec)
+    const useStream = (stream: MediaStream, errorMessage: string | null = null) => {
       stream.getAudioTracks().forEach((track) => {
         track.enabled = false;
       });
 
+      const videoTrack = stream.getVideoTracks()[0] ?? null;
       localStreamRef.current = stream;
-      if (stream.getVideoTracks().length > 0) {
-        originalCamTrackRef.current = stream.getVideoTracks()[0];
-      }
+      originalCamTrackRef.current = videoTrack;
       setLocalStream(stream);
       setIsMuted(true);
+      setIsCameraOff(!videoTrack);
+      setMediaError(errorMessage);
       return stream;
+    };
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: VIDEO_CONSTRAINTS,
+        audio: AUDIO_CONSTRAINTS,
+      });
+      return useStream(stream);
     } catch (err: any) {
       console.warn('getUserMedia error:', err);
-      // If video+audio fails, try audio-only or video-only
+      let videoError: unknown = null;
       try {
         const videoOnly = await navigator.mediaDevices.getUserMedia({ video: true });
-        localStreamRef.current = videoOnly;
-        setLocalStream(videoOnly);
-        return videoOnly;
-      } catch (videoErr) {
-        setMediaError(
-          err.name === 'NotAllowedError'
-            ? 'Camera/Mic permission was denied. You can still join the room!'
-            : 'Unable to access camera or microphone.'
-        );
-        return null;
+        return useStream(videoOnly, 'Camera is available, but the microphone could not be opened. Allow microphone access and retry.');
+      } catch (fallbackError) {
+        videoError = fallbackError;
       }
+
+      let audioError: unknown = null;
+      try {
+        const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
+        return useStream(audioOnly, 'Microphone is available, but the camera could not be opened. Allow camera access and retry.');
+      } catch (fallbackError) {
+        audioError = fallbackError;
+      }
+
+      setMediaError(describeMediaError([err, videoError, audioError]));
+      return null;
     }
   }, []);
 
   // Initialize PeerJS mesh
   const initPeer = useCallback(
-    async (stream: MediaStream | null) => {
+    async () => {
       if (typeof window === 'undefined') return;
 
       try {
         const { Peer } = await import('peerjs');
+        if (peerRef.current) return;
 
         // STUN servers configuration
         const peer = new Peer({
@@ -123,15 +169,17 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
         peerRef.current = peer;
 
         peer.on('open', (peerId: string) => {
+          myPeerIdRef.current = peerId;
           setMyPeerId(peerId);
 
           if (isFirebaseConfigured && db && roomId) {
             const myRef = ref(db, `rooms/${roomId}/participants/${peerId}`);
+            const localStream = localStreamRef.current;
             set(myRef, {
-              name: displayName || 'Anonymous',
-              muted: true,
-              cameraOff: false,
-              goal: initialGoal || '',
+              name: displayNameRef.current || 'Anonymous',
+              muted: localStream?.getAudioTracks().every((track) => !track.enabled) ?? true,
+              cameraOff: !localStream?.getVideoTracks().some((track) => track.readyState === 'live' && track.enabled),
+              goal: initialGoalRef.current || '',
               joinedAt: Date.now(),
             }).catch(console.warn);
 
@@ -140,19 +188,21 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
 
             // Listen for other room participants
             const participantsDbRef = ref(db, `rooms/${roomId}/participants`);
-            onValue(participantsDbRef, (snapshot) => {
+            participantUnsubscribeRef.current = onValue(participantsDbRef, (snapshot) => {
               const data = snapshot.val() || {};
               const remoteIds = Object.keys(data).filter((id) => id !== peerId);
+              const currentStream = localStreamRef.current;
 
               // Connect to any new peers
               remoteIds.forEach((remoteId) => {
-                if (!connectionsRef.current.has(remoteId) && stream) {
+                if (!connectionsRef.current.has(remoteId) && currentStream) {
                   try {
-                    const call = peer.call(remoteId, stream);
+                    const call = peer.call(remoteId, currentStream);
                     if (call) {
                       connectionsRef.current.set(remoteId, call);
 
                       call.on('stream', (remoteStream: MediaStream) => {
+                        if (connectionsRef.current.get(remoteId) !== call) return;
                         participantsRef.current.set(remoteId, {
                           id: remoteId,
                           name: data[remoteId]?.name || 'Study Buddy',
@@ -165,6 +215,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
                       });
 
                       call.on('close', () => {
+                        if (connectionsRef.current.get(remoteId) !== call) return;
                         participantsRef.current.delete(remoteId);
                         connectionsRef.current.delete(remoteId);
                         updateParticipants();
@@ -172,6 +223,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
 
                       call.on('error', (callErr: any) => {
                         console.warn('Call error with peer:', remoteId, callErr);
+                        if (connectionsRef.current.get(remoteId) !== call) return;
                         participantsRef.current.delete(remoteId);
                         connectionsRef.current.delete(remoteId);
                         updateParticipants();
@@ -209,16 +261,21 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
 
         // Answer incoming calls
         peer.on('call', (call: any) => {
-          if (stream) {
-            call.answer(stream);
+          const currentStream = localStreamRef.current;
+          if (currentStream) {
+            call.answer(currentStream);
           } else {
             // Answer with empty audio/video if local media isn't available
             call.answer();
           }
 
           const remotePeerId = call.peer;
+          const previousConnection = connectionsRef.current.get(remotePeerId);
+          if (previousConnection && previousConnection !== call) previousConnection.close();
+          connectionsRef.current.set(remotePeerId, call);
 
           call.on('stream', (remoteStream: MediaStream) => {
+            if (connectionsRef.current.get(remotePeerId) !== call) return;
             if (isFirebaseConfigured && db && roomId) {
               const snapRef = ref(db, `rooms/${roomId}/participants/${remotePeerId}`);
               onValue(
@@ -253,6 +310,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
           });
 
           call.on('close', () => {
+            if (connectionsRef.current.get(remotePeerId) !== call) return;
             participantsRef.current.delete(remotePeerId);
             connectionsRef.current.delete(remotePeerId);
             updateParticipants();
@@ -266,28 +324,151 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
         console.error('Failed to load PeerJS:', err);
       }
     },
-    [roomId, displayName, initialGoal, updateParticipants]
+    [roomId, updateParticipants]
   );
 
+  const restartPeerWithCurrentMedia = useCallback(async () => {
+    let restart = peerRestartRef.current;
+    if (!restart) {
+      restart = (async () => {
+        const oldPeerId = myPeerIdRef.current;
+        const oldPeer = peerRef.current;
+
+        participantUnsubscribeRef.current?.();
+        participantUnsubscribeRef.current = null;
+
+        if (oldPeerId && isFirebaseConfigured && db && roomId) {
+          await remove(ref(db, `rooms/${roomId}/participants/${oldPeerId}`)).catch(console.warn);
+        }
+
+        peerRef.current = null;
+        myPeerIdRef.current = '';
+        setMyPeerId('');
+        oldPeer?.destroy();
+
+        connectionsRef.current.forEach((connection) => connection.close());
+        connectionsRef.current.clear();
+        participantsRef.current.clear();
+        updateParticipants();
+
+        await initPeer();
+      })();
+      peerRestartRef.current = restart;
+    }
+
+    try {
+      await restart;
+    } finally {
+      if (peerRestartRef.current === restart) peerRestartRef.current = null;
+    }
+  }, [initPeer, roomId, updateParticipants]);
+
+  const requestMedia = useCallback(async (unmuteAudio = false, restartPeerOnChange = false): Promise<MediaStream | null> => {
+    let pending = mediaRequestRef.current;
+
+    if (!pending) {
+      setIsRequestingMedia(true);
+      setMediaError(null);
+      pending = (async () => {
+        const existingStream = localStreamRef.current;
+        if (!existingStream) {
+          const stream = await initMedia();
+          return { stream, changed: Boolean(stream) };
+        }
+
+        const needsVideo = !existingStream.getVideoTracks().some((track) => track.readyState === 'live');
+        const needsAudio = !existingStream.getAudioTracks().some((track) => track.readyState === 'live');
+        if (!needsVideo && !needsAudio) return { stream: existingStream, changed: false };
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          setMediaError(describeMediaError([]));
+          return { stream: existingStream, changed: false };
+        }
+
+        try {
+          const additionalStream = await navigator.mediaDevices.getUserMedia({
+            video: needsVideo ? VIDEO_CONSTRAINTS : false,
+            audio: needsAudio ? AUDIO_CONSTRAINTS : false,
+          });
+
+          const additionalTracks = additionalStream.getTracks();
+          additionalTracks.forEach((track) => {
+            if (track.kind === 'audio') track.enabled = false;
+            if (track.kind === 'video') originalCamTrackRef.current = track;
+            existingStream.addTrack(track);
+          });
+
+          localStreamRef.current = existingStream;
+          setLocalStream(new MediaStream(existingStream.getTracks()));
+          setIsCameraOff(!existingStream.getVideoTracks().some((track) => track.readyState === 'live'));
+          setIsMuted(existingStream.getAudioTracks().every((track) => !track.enabled));
+          setMediaError(null);
+          return { stream: existingStream, changed: additionalTracks.length > 0 };
+        } catch (error) {
+          setMediaError(describeMediaError([error]));
+          return { stream: existingStream, changed: false };
+        }
+      })();
+
+      mediaRequestRef.current = pending;
+    }
+
+    try {
+      const { stream, changed } = await pending;
+      if (!stream) {
+        if (!peerRef.current) await initPeer();
+        return null;
+      }
+
+      const audioTracks = stream.getAudioTracks();
+      if (unmuteAudio && audioTracks.length > 0) {
+        audioTracks.forEach((track) => {
+          track.enabled = true;
+        });
+        setIsMuted(false);
+      }
+
+      if (restartPeerOnChange && changed && peerRef.current) {
+        await restartPeerWithCurrentMedia();
+      } else if (!peerRef.current) {
+        await initPeer();
+      }
+
+      return stream;
+    } finally {
+      if (mediaRequestRef.current === pending) {
+        mediaRequestRef.current = null;
+        setIsRequestingMedia(false);
+      }
+    }
+  }, [initMedia, initPeer, restartPeerWithCurrentMedia]);
+
+  const retryMedia = useCallback(() => requestMedia(false, true), [requestMedia]);
+
   useEffect(() => {
-    if (!roomId) return;
-    let active = true;
+    if (!roomId || !displayName) return;
+    void requestMedia();
+  }, [roomId, displayName, requestMedia]);
 
-    initMedia().then((stream) => {
-      if (!active) return;
-      initPeer(stream);
-    });
+  useEffect(() => {
+    const peerId = myPeerIdRef.current;
+    if (!peerId || !isFirebaseConfigured || !db || !roomId) return;
 
-    return () => {
-      active = false;
-    };
-  }, [roomId, initMedia, initPeer]);
+    update(ref(db, `rooms/${roomId}/participants/${peerId}`), {
+      name: displayName || 'Anonymous',
+      goal: initialGoal || '',
+    }).catch(console.warn);
+  }, [displayName, initialGoal, myPeerId, roomId]);
 
   // Toggle Mute
   const toggleMute = useCallback(() => {
-    if (!localStreamRef.current) return;
+    const audioTracks = localStreamRef.current?.getAudioTracks().filter((track) => track.readyState === 'live') ?? [];
+    if (audioTracks.length === 0) {
+      void requestMedia(true, true);
+      return;
+    }
     const newMuted = !isMuted;
-    localStreamRef.current.getAudioTracks().forEach((track) => {
+    audioTracks.forEach((track) => {
       track.enabled = !newMuted;
     });
     setIsMuted(newMuted);
@@ -295,13 +476,17 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
     if (isFirebaseConfigured && db && roomId && myPeerId) {
       set(ref(db, `rooms/${roomId}/participants/${myPeerId}/muted`), newMuted).catch(console.warn);
     }
-  }, [isMuted, roomId, myPeerId]);
+  }, [isMuted, roomId, myPeerId, requestMedia]);
 
   // Toggle Camera
   const toggleCamera = useCallback(() => {
-    if (!localStreamRef.current) return;
+    const videoTracks = localStreamRef.current?.getVideoTracks().filter((track) => track.readyState === 'live') ?? [];
+    if (videoTracks.length === 0) {
+      void requestMedia(false, true);
+      return;
+    }
     const newCameraOff = !isCameraOff;
-    localStreamRef.current.getVideoTracks().forEach((track) => {
+    videoTracks.forEach((track) => {
       track.enabled = !newCameraOff;
     });
     setIsCameraOff(newCameraOff);
@@ -309,7 +494,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
     if (isFirebaseConfigured && db && roomId && myPeerId) {
       set(ref(db, `rooms/${roomId}/participants/${myPeerId}/cameraOff`), newCameraOff).catch(console.warn);
     }
-  }, [isCameraOff, roomId, myPeerId]);
+  }, [isCameraOff, roomId, myPeerId, requestMedia]);
 
   // Toggle Screen Sharing
   const toggleScreenShare = useCallback(async () => {
@@ -416,9 +601,13 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
     }
 
     if (peerRef.current) {
+      participantUnsubscribeRef.current?.();
+      participantUnsubscribeRef.current = null;
       peerRef.current.destroy();
       peerRef.current = null;
     }
+    myPeerIdRef.current = '';
+    setMyPeerId('');
 
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -439,6 +628,8 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
     isCameraOff,
     isScreenSharing,
     mediaError,
+    isRequestingMedia,
+    retryMedia,
     toggleMute,
     toggleCamera,
     toggleScreenShare,

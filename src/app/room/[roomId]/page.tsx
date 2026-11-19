@@ -58,6 +58,8 @@ function RoomContent() {
     isCameraOff,
     isScreenSharing,
     mediaError,
+    isRequestingMedia,
+    retryMedia,
     toggleMute,
     toggleCamera,
     toggleScreenShare,
@@ -142,17 +144,20 @@ function RoomContent() {
   return (
     <div className={`h-screen w-screen flex flex-col overflow-hidden transition-colors duration-500 ${bgTheme}`}>
       {/* Media Permission Warning Banner if any */}
-      {mediaError && (
-        <div className="bg-amber-500/20 border-b border-amber-500/30 text-amber-200 px-4 py-1.5 text-xs flex items-center justify-between z-30">
+      {(mediaError || isRequestingMedia) && (
+        <div role="alert" className="bg-amber-500/20 border-b border-amber-500/30 text-amber-200 px-4 py-2 text-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 z-30">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-            <span>{mediaError}</span>
+            <span className="leading-relaxed">
+              {isRequestingMedia ? 'Requesting camera and microphone access…' : mediaError}
+            </span>
           </div>
           <button
-            onClick={() => window.location.reload()}
-            className="underline font-medium hover:text-white"
+            onClick={() => void retryMedia()}
+            disabled={isRequestingMedia}
+            className="underline font-medium hover:text-white disabled:opacity-60 disabled:cursor-wait self-start sm:self-auto flex-shrink-0"
           >
-            Retry Permission
+            {isRequestingMedia ? 'Requesting access…' : 'Try again'}
           </button>
         </div>
       )}
