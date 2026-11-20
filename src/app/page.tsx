@@ -191,14 +191,14 @@ export default function LobbyPage() {
             </div>
 
             <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight text-white leading-tight">
-              Focus together. <br className="hidden sm:block" />
+              A free virtual study room. <br className="hidden sm:block" />
               <span className="bg-gradient-to-r from-purple-400 via-indigo-300 to-pink-400 bg-clip-text text-transparent">
-                Anytime, anywhere.
+                Study online with friends.
               </span>
             </h1>
 
             <p className="text-sm sm:text-base text-slate-400 max-w-xl">
-              Turn your camera on, set your study goal, sync Pomodoro breaks with friends, and enjoy ambient soundscapes without awkward silent calls.
+              StudyRoom is a free online study room where classmates and friends focus together on camera. Create or join with a link, use a shared Pomodoro timer, track study goals, chat, and play ambient sounds. No account required.
             </p>
 
             {/* Webcam & Mic Live Preview Card */}
@@ -396,6 +396,29 @@ export default function LobbyPage() {
             );
           })}
         </div>
+
+        <section aria-labelledby="study-room-guide" className="mt-12 w-full max-w-4xl mx-auto glass-card rounded-3xl p-6 md:p-8 border border-white/10">
+          <h2 id="study-room-guide" className="text-xl md:text-2xl font-bold text-white text-center">
+            A simple online study room for focused sessions
+          </h2>
+          <p className="mt-3 text-sm leading-relaxed text-slate-300 text-center max-w-3xl mx-auto">
+            Study with friends from anywhere without coordinating a video call. Share one room link, keep cameras on for accountability, and stay in sync with a group focus timer, goals, chat, and relaxing background sounds.
+          </p>
+          <div className="mt-6 grid gap-4 md:grid-cols-3 text-sm">
+            <div>
+              <h3 className="font-semibold text-purple-200">How do I join?</h3>
+              <p className="mt-1 text-slate-400">Create a study room and send its invite link, or enter a friend’s room code.</p>
+            </div>
+            <div>
+              <h3 className="font-semibold text-purple-200">Is StudyRoom free?</h3>
+              <p className="mt-1 text-slate-400">Yes. Join a virtual study session without creating an account.</p>
+            </div>
+            <div>
+              <h3 className="font-semibold text-purple-200">Can we use Pomodoro?</h3>
+              <p className="mt-1 text-slate-400">Yes. Start shared focus and break sessions while everyone’s timer stays in sync.</p>
+            </div>
+          </div>
+        </section>
       </main>
 
       {/* Footer */}
