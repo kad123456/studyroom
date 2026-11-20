@@ -21,6 +21,7 @@ interface UseWebRTCReturn {
   isCameraOff: boolean;
   isScreenSharing: boolean;
   mediaError: string | null;
+  roomSyncError: string | null;
   isRequestingMedia: boolean;
   retryMedia: () => Promise<MediaStream | null>;
   toggleMute: () => void;
@@ -85,6 +86,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState<string | null>(null);
   const [isRequestingMedia, setIsRequestingMedia] = useState(false);
   const [myGoal, setMyGoal] = useState(initialGoal);
 
@@ -179,23 +181,46 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
               name: displayNameRef.current || 'Anonymous',
               muted: localStream?.getAudioTracks().every((track) => !track.enabled) ?? true,
               cameraOff: !localStream?.getVideoTracks().some((track) => track.readyState === 'live' && track.enabled),
+              hasMedia: Boolean(localStream?.getTracks().some((track) => track.readyState === 'live')),
               goal: initialGoalRef.current || '',
               joinedAt: Date.now(),
-            }).catch(console.warn);
+            }).catch((error) => {
+              console.warn('Could not register room participant:', error);
+              setRoomSyncError('Firebase denied access to this room. Its Realtime Database rules must allow reads and writes under /rooms.');
+            });
 
             // Clean up upon connection drop
-            onDisconnect(myRef).remove();
+            onDisconnect(myRef).remove().catch((error) => {
+              console.warn('Could not register participant cleanup:', error);
+            });
 
             // Listen for other room participants
             const participantsDbRef = ref(db, `rooms/${roomId}/participants`);
             participantUnsubscribeRef.current = onValue(participantsDbRef, (snapshot) => {
+              setRoomSyncError(null);
               const data = snapshot.val() || {};
               const remoteIds = Object.keys(data).filter((id) => id !== peerId);
               const currentStream = localStreamRef.current;
+              const localHasMedia = Boolean(currentStream?.getTracks().some((track) => track.readyState === 'live'));
 
               // Connect to any new peers
               remoteIds.forEach((remoteId) => {
-                if (!connectionsRef.current.has(remoteId) && currentStream) {
+                const remoteParticipant = data[remoteId] || {};
+                const remoteHasMedia = remoteParticipant.hasMedia !== false;
+                const shouldInitiate = localHasMedia && (!remoteHasMedia || peerId < remoteId);
+
+                if (!participantsRef.current.has(remoteId)) {
+                  participantsRef.current.set(remoteId, {
+                    id: remoteId,
+                    name: remoteParticipant.name || 'Study Buddy',
+                    stream: null,
+                    muted: remoteParticipant.muted ?? true,
+                    cameraOff: remoteParticipant.cameraOff ?? !remoteHasMedia,
+                    goal: remoteParticipant.goal || '',
+                  });
+                }
+
+                if (!connectionsRef.current.has(remoteId) && currentStream && shouldInitiate) {
                   try {
                     const call = peer.call(remoteId, currentStream);
                     if (call) {
@@ -205,11 +230,11 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
                         if (connectionsRef.current.get(remoteId) !== call) return;
                         participantsRef.current.set(remoteId, {
                           id: remoteId,
-                          name: data[remoteId]?.name || 'Study Buddy',
+                          name: remoteParticipant.name || 'Study Buddy',
                           stream: remoteStream,
-                          muted: data[remoteId]?.muted ?? true,
-                          cameraOff: data[remoteId]?.cameraOff ?? false,
-                          goal: data[remoteId]?.goal || '',
+                          muted: remoteParticipant.muted ?? true,
+                          cameraOff: remoteParticipant.cameraOff ?? false,
+                          goal: remoteParticipant.goal || '',
                         });
                         updateParticipants();
                       });
@@ -237,10 +262,10 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
                   const existing = participantsRef.current.get(remoteId)!;
                   participantsRef.current.set(remoteId, {
                     ...existing,
-                    name: data[remoteId]?.name || existing.name,
-                    muted: data[remoteId]?.muted ?? existing.muted,
-                    cameraOff: data[remoteId]?.cameraOff ?? existing.cameraOff,
-                    goal: data[remoteId]?.goal ?? existing.goal,
+                    name: remoteParticipant.name || existing.name,
+                    muted: remoteParticipant.muted ?? existing.muted,
+                    cameraOff: remoteParticipant.cameraOff ?? existing.cameraOff,
+                    goal: remoteParticipant.goal ?? existing.goal,
                   });
                   updateParticipants();
                 }
@@ -255,23 +280,21 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
                 }
               }
               updateParticipants();
+            }, (error) => {
+              console.warn('Room participant read failed:', error);
+              setRoomSyncError('Firebase denied access to this room. Its Realtime Database rules must allow reads and writes under /rooms.');
             });
           }
         });
 
         // Answer incoming calls
         peer.on('call', (call: any) => {
-          const currentStream = localStreamRef.current;
-          if (currentStream) {
-            call.answer(currentStream);
-          } else {
-            // Answer with empty audio/video if local media isn't available
-            call.answer();
-          }
-
           const remotePeerId = call.peer;
           const previousConnection = connectionsRef.current.get(remotePeerId);
-          if (previousConnection && previousConnection !== call) previousConnection.close();
+          if (previousConnection && previousConnection !== call) {
+            call.close();
+            return;
+          }
           connectionsRef.current.set(remotePeerId, call);
 
           call.on('stream', (remoteStream: MediaStream) => {
@@ -315,6 +338,22 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
             connectionsRef.current.delete(remotePeerId);
             updateParticipants();
           });
+
+          call.on('error', (callError: any) => {
+            console.warn('Incoming call failed:', remotePeerId, callError);
+            if (connectionsRef.current.get(remotePeerId) !== call) return;
+            participantsRef.current.delete(remotePeerId);
+            connectionsRef.current.delete(remotePeerId);
+            updateParticipants();
+          });
+
+          const currentStream = localStreamRef.current;
+          if (currentStream) {
+            call.answer(currentStream);
+          } else {
+            // Keep the room participant visible even when this device has no local media.
+            call.answer();
+          }
         });
 
         peer.on('error', (err: any) => {
@@ -628,6 +667,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
     isCameraOff,
     isScreenSharing,
     mediaError,
+    roomSyncError,
     isRequestingMedia,
     retryMedia,
     toggleMute,

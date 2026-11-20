@@ -58,6 +58,7 @@ function RoomContent() {
     isCameraOff,
     isScreenSharing,
     mediaError,
+    roomSyncError,
     isRequestingMedia,
     retryMedia,
     toggleMute,
@@ -159,6 +160,12 @@ function RoomContent() {
           >
             {isRequestingMedia ? 'Requesting access…' : 'Try again'}
           </button>
+        </div>
+      )}
+      {roomSyncError && (
+        <div role="alert" className="bg-red-500/20 border-b border-red-500/30 text-red-100 px-4 py-2 text-xs flex items-center gap-2 z-30">
+          <AlertCircle className="w-4 h-4 text-red-300 flex-shrink-0" />
+          <span className="leading-relaxed">{roomSyncError}</span>
         </div>
       )}
 
