@@ -25,12 +25,26 @@ export default function VideoTile({
   onTogglePin,
 }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      void videoRef.current.play().catch((error) => {
+        console.warn('Could not start participant video playback:', error);
+      });
     }
-  }, [stream]);
+
+    if (audioRef.current) {
+      audioRef.current.srcObject = !isLocal && stream ? stream : null;
+      audioRef.current.muted = isLocal || muted;
+      if (!audioRef.current.muted) {
+        void audioRef.current.play().catch((error) => {
+          console.warn('Could not start participant audio playback:', error);
+        });
+      }
+    }
+  }, [stream, isLocal, muted]);
 
   return (
     <div
@@ -45,7 +59,7 @@ export default function VideoTile({
           ref={videoRef}
           autoPlay
           playsInline
-          muted={isLocal}
+          muted
           className="w-full h-full object-cover"
           style={{ transform: isLocal ? 'scaleX(-1)' : 'none' }}
         />
@@ -61,6 +75,8 @@ export default function VideoTile({
           </span>
         </div>
       )}
+
+      {!isLocal && stream && <audio ref={audioRef} autoPlay className="hidden" />}
 
       {/* Top action controls overlay */}
       <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10 opacity-90 transition-opacity">
