@@ -23,16 +23,21 @@ function RoomContent() {
 
   // Check stored name on mount
   useEffect(() => {
+    let restoreFrame: number;
     const savedName = sessionStorage.getItem('studyroom_name');
     const savedGoal = sessionStorage.getItem('studyroom_goal') || '';
 
     if (savedName) {
-      setDisplayName(savedName);
-      setInitialGoal(savedGoal);
+      restoreFrame = requestAnimationFrame(() => {
+        setDisplayName(savedName);
+        setInitialGoal(savedGoal);
+      });
     } else {
       // User entered via direct link without visiting lobby
-      setShowJoinModal(true);
+      restoreFrame = requestAnimationFrame(() => setShowJoinModal(true));
     }
+
+    return () => cancelAnimationFrame(restoreFrame);
   }, []);
 
   const handleJoinFromModal = (e: React.FormEvent) => {
@@ -43,6 +48,8 @@ function RoomContent() {
     sessionStorage.setItem('studyroom_name', name);
     if (joinInputGoal.trim()) {
       sessionStorage.setItem('studyroom_goal', joinInputGoal.trim());
+    } else {
+      sessionStorage.removeItem('studyroom_goal');
     }
 
     setDisplayName(name);

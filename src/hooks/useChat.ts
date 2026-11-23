@@ -19,28 +19,33 @@ export function useChat(roomId: string, displayName: string) {
 
     if (!isFirebaseConfigured || !db) {
       // Local welcome message in offline/preview mode
-      setMessages([
-        {
-          id: 'welcome',
-          name: 'StudyRoom Bot',
-          text: 'Welcome to your study room! Chat with peers here. Add your Firebase keys in .env.local to enable real-time cloud sync across browsers.',
-          timestamp: Date.now(),
-          isSystem: true,
-        },
-      ]);
-      return;
+      const timeout = window.setTimeout(() => {
+        setMessages([
+          {
+            id: 'welcome',
+            name: 'StudyRoom Bot',
+            text: 'Welcome to your study room! Chat with peers here. Add your Firebase keys in .env.local to enable real-time cloud sync across browsers.',
+            timestamp: Date.now(),
+            isSystem: true,
+          },
+        ]);
+      }, 0);
+      return () => window.clearTimeout(timeout);
     }
 
     const chatQuery = query(ref(db, `rooms/${roomId}/chat`), limitToLast(100));
     const unsubscribe = onValue(chatQuery, (snapshot) => {
       const data = snapshot.val() || {};
-      const parsed: ChatMessage[] = Object.entries(data).map(([id, val]: [string, any]) => ({
-        id,
-        name: val.name || 'Anonymous',
-        text: val.text || '',
-        timestamp: val.timestamp || Date.now(),
-        isSystem: val.isSystem || false,
-      })).sort((a, b) => a.timestamp - b.timestamp);
+      const parsed: ChatMessage[] = Object.entries(data).map(([id, value]) => {
+        const val = value as Partial<ChatMessage>;
+        return {
+          id,
+          name: val.name || 'Anonymous',
+          text: val.text || '',
+          timestamp: val.timestamp || Date.now(),
+          isSystem: val.isSystem || false,
+        };
+      }).sort((a, b) => a.timestamp - b.timestamp);
 
       setMessages(parsed);
     });

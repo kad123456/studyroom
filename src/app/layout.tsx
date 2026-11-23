@@ -3,28 +3,35 @@ import "./globals.css";
 
 const siteUrl = "https://studyroom-topaz.vercel.app";
 const siteDescription =
-  "Study online with friends in a free virtual study room. Focus together on webcam, use a shared Pomodoro timer, track goals, chat, and play ambient sounds. No sign-up required.";
+  "Join live online study rooms and focus with friends in a free virtual study room. Use a shared Pomodoro timer, track goals, chat, and play ambient sounds. No account required.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   applicationName: "StudyRoom",
   title: {
-    default: "StudyRoom | Free Virtual Study Room & Focus Timer",
+    default: "StudyRoom | Free Online Study Rooms & Focus Timer",
     template: "%s | StudyRoom",
   },
   description: siteDescription,
+  keywords: [
+    "free online study room",
+    "virtual study rooms",
+    "study with friends online",
+    "online study group",
+    "shared Pomodoro timer",
+  ],
   alternates: { canonical: "/" },
   openGraph: {
     type: "website",
     url: siteUrl,
     siteName: "StudyRoom",
-    title: "StudyRoom | Free Virtual Study Room & Focus Timer",
+    title: "StudyRoom | Free Online Study Rooms & Focus Timer",
     description: siteDescription,
     images: [{ url: "/opengraph-image", width: 1200, height: 630, alt: "StudyRoom — focus together online" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "StudyRoom | Free Virtual Study Room & Focus Timer",
+    title: "StudyRoom | Free Online Study Rooms & Focus Timer",
     description: siteDescription,
     images: ["/opengraph-image"],
   },

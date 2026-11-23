@@ -2,6 +2,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { generateRoomId } from '@/lib/utils';
+import { db, isFirebaseConfigured } from '@/lib/firebase';
+import { onValue, ref } from 'firebase/database';
 import {
   Video,
   VideoOff,
@@ -14,8 +16,13 @@ import {
   Timer,
   Music,
   ShieldCheck,
-  Zap,
 } from 'lucide-react';
+
+const defaultRooms = [
+  { id: 'quiet-focus', name: 'Quiet Focus', description: 'Settle in for a calm, distraction-free study session.', icon: '🌙' },
+  { id: 'exam-prep', name: 'Exam Prep', description: 'Work through revision alongside other learners.', icon: '📚' },
+  { id: 'study-together', name: 'Study Together', description: 'Bring any subject and make progress together.', icon: '✨' },
+];
 
 export default function LobbyPage() {
   const router = useRouter();
@@ -24,6 +31,11 @@ export default function LobbyPage() {
   const [roomCode, setRoomCode] = useState('');
   const [mode, setMode] = useState<'create' | 'join'>('create');
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [liveRooms, setLiveRooms] = useState<Record<string, number>>({});
+  const [roomDirectoryStatus, setRoomDirectoryStatus] = useState<'loading' | 'ready' | 'unavailable'>(
+    isFirebaseConfigured && db ? 'loading' : 'unavailable',
+  );
 
   // Media preview states
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
@@ -32,12 +44,39 @@ export default function LobbyPage() {
   const [hasMediaPermission, setHasMediaPermission] = useState<boolean | null>(null);
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !db) {
+      return;
+    }
+
+    const unsubscribe = onValue(
+      ref(db, 'publicRooms'),
+      (snapshot) => {
+        const directory = snapshot.val() as Record<string, Record<string, unknown>> | null;
+        const counts: Record<string, number> = {};
+        for (const [roomId, participants] of Object.entries(directory ?? {})) {
+          counts[roomId] = Object.keys(participants ?? {}).length;
+        }
+        setLiveRooms(counts);
+        setRoomDirectoryStatus('ready');
+      },
+      (error) => {
+        console.warn('Live room directory is unavailable:', error);
+        setRoomDirectoryStatus('unavailable');
+      },
+    );
+
+    return () => unsubscribe();
+  }, []);
 
   // Setup initial camera preview
   useEffect(() => {
     let streamInstance: MediaStream | null = null;
     let animId: number;
+    let restoreNameFrame: number | undefined;
 
     async function startPreview() {
       if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) return;
@@ -91,10 +130,13 @@ export default function LobbyPage() {
 
     // Load any remembered name from sessionStorage
     const savedName = sessionStorage.getItem('studyroom_name');
-    if (savedName) setDisplayName(savedName);
+    if (savedName) {
+      restoreNameFrame = requestAnimationFrame(() => setDisplayName(savedName));
+    }
 
     return () => {
       if (animId) cancelAnimationFrame(animId);
+      if (restoreNameFrame) cancelAnimationFrame(restoreNameFrame);
       if (audioContextRef.current) {
         audioContextRef.current.close().catch(() => {});
       }
@@ -122,23 +164,23 @@ export default function LobbyPage() {
     setMicEnabled(next);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const enterRoom = (targetRoomId: string) => {
     const cleanName = displayName.trim();
-    if (!cleanName) return;
-
-    setLoading(true);
-    const targetRoomId = mode === 'create' ? generateRoomId() : roomCode.trim().toLowerCase();
-
-    if (!targetRoomId) {
-      setLoading(false);
+    if (!cleanName) {
+      setMode('join');
+      setRoomCode(targetRoomId);
+      requestAnimationFrame(() => nameInputRef.current?.focus());
       return;
     }
+
+    setLoading(true);
 
     // Persist details for the room session
     sessionStorage.setItem('studyroom_name', cleanName);
     if (studyGoal.trim()) {
       sessionStorage.setItem('studyroom_goal', studyGoal.trim());
+    } else {
+      sessionStorage.removeItem('studyroom_goal');
     }
 
     // Stop lobby stream so room page can claim media cleanly
@@ -148,6 +190,28 @@ export default function LobbyPage() {
 
     router.push(`/room/${targetRoomId}`);
   };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    const targetRoomId = mode === 'create' ? generateRoomId() : roomCode.trim().toLowerCase();
+
+    if (!targetRoomId) {
+      setFormError('Enter a room code to join.');
+      return;
+    }
+    if (!/^[a-z0-9-]{1,30}$/.test(targetRoomId)) {
+      setFormError('Room codes can use lowercase letters, numbers, and hyphens.');
+      return;
+    }
+
+    enterRoom(targetRoomId);
+  };
+
+  const otherRooms = Object.entries(liveRooms)
+    .filter(([roomId, count]) => count > 0 && !defaultRooms.some((room) => room.id === roomId) && /^[a-z0-9-]{1,30}$/.test(roomId))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 6);
 
   return (
     <div className="min-h-screen bg-theme-cozy text-slate-100 flex flex-col justify-between relative overflow-hidden">
@@ -308,6 +372,7 @@ export default function LobbyPage() {
                     Your Name
                   </label>
                   <input
+                    ref={nameInputRef}
                     type="text"
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
@@ -351,6 +416,8 @@ export default function LobbyPage() {
                   </div>
                 )}
 
+                {formError && <p role="alert" className="text-xs text-rose-300">{formError}</p>}
+
                 {/* Submit Action Button */}
                 <button
                   type="submit"
@@ -370,6 +437,74 @@ export default function LobbyPage() {
             </div>
           </div>
         </div>
+
+        <section aria-labelledby="open-study-rooms" className="mt-12 w-full">
+          <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-purple-300">Drop in and focus</p>
+              <h2 id="open-study-rooms" className="mt-1 text-2xl font-bold text-white">Open study rooms</h2>
+              <p className="mt-1 text-sm text-slate-400">Choose a room and see how many people are studying there now.</p>
+            </div>
+            <span className="inline-flex items-center gap-2 text-xs text-slate-400">
+              <span className={`h-2 w-2 rounded-full ${roomDirectoryStatus === 'ready' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+              {roomDirectoryStatus === 'loading' ? 'Checking live rooms' : roomDirectoryStatus === 'ready' ? 'Live people count' : 'Live counts unavailable'}
+            </span>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            {defaultRooms.map((room) => (
+              <article key={room.id} className="glass-card rounded-2xl border border-white/10 p-4 flex flex-col">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <span aria-hidden="true" className="text-2xl">{room.icon}</span>
+                    <div>
+                      <h3 className="font-semibold text-white">{room.name}</h3>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-400">{room.description}</p>
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-emerald-400/10 px-2.5 py-1 text-xs font-semibold text-emerald-200">
+                    {roomDirectoryStatus === 'ready' ? `${liveRooms[room.id] ?? 0} ${liveRooms[room.id] === 1 ? 'person' : 'people'}` : '—'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => enterRoom(room.id)}
+                  disabled={loading}
+                  className="mt-4 w-full rounded-xl border border-purple-400/20 bg-purple-500/10 px-3 py-2 text-sm font-semibold text-purple-100 transition hover:bg-purple-500/20 disabled:opacity-50"
+                >
+                  Join room
+                </button>
+              </article>
+            ))}
+          </div>
+
+          {roomDirectoryStatus === 'unavailable' && (
+            <p className="mt-3 text-xs text-amber-200/80">The public room count could not load. You can still create a room or join with a code.</p>
+          )}
+
+          {otherRooms.length > 0 && (
+              <div className="mt-6">
+                <h3 className="mb-3 text-sm font-semibold text-slate-200">Other active rooms</h3>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {otherRooms.map(([roomId, count]) => (
+                      <button
+                        key={roomId}
+                        type="button"
+                        onClick={() => enterRoom(roomId)}
+                        disabled={loading}
+                        className="glass rounded-2xl border border-white/10 p-4 text-left transition hover:border-purple-400/40 disabled:opacity-50"
+                      >
+                        <span className="flex items-center justify-between gap-3">
+                          <span className="font-semibold text-white">Room {roomId}</span>
+                          <span className="text-xs text-emerald-200">{count} {count === 1 ? 'person' : 'people'}</span>
+                        </span>
+                        <span className="mt-1 block text-xs text-slate-400">Join a live room by code</span>
+                      </button>
+                    ))}
+                </div>
+              </div>
+            )}
+        </section>
 
         {/* Feature Pills Footer Row */}
         <div className="mt-12 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">

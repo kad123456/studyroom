@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { db, isFirebaseConfigured } from '@/lib/firebase';
 import { ref, set, update, onValue, remove, onDisconnect } from 'firebase/database';
+import type { MediaConnection, Peer as PeerClient } from 'peerjs';
 
 export interface Participant {
   id: string;
@@ -66,18 +67,16 @@ function describeMediaError(errors: unknown[]): string {
 export function useWebRTC(roomId: string, displayName: string, initialGoal: string = ''): UseWebRTCReturn {
   const localStreamRef = useRef<MediaStream | null>(null);
   const originalCamTrackRef = useRef<MediaStreamTrack | null>(null);
-  const peerRef = useRef<any>(null);
+  const screenVideoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const peerRef = useRef<PeerClient | null>(null);
   const myPeerIdRef = useRef('');
   const displayNameRef = useRef(displayName);
   const initialGoalRef = useRef(initialGoal);
   const mediaRequestRef = useRef<Promise<{ stream: MediaStream | null; changed: boolean }> | null>(null);
   const peerRestartRef = useRef<Promise<void> | null>(null);
   const participantUnsubscribeRef = useRef<(() => void) | null>(null);
-  const connectionsRef = useRef<Map<string, any>>(new Map());
+  const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const participantsRef = useRef<Map<string, Participant>>(new Map());
-
-  displayNameRef.current = displayName;
-  initialGoalRef.current = initialGoal;
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [participants, setParticipants] = useState<Map<string, Participant>>(new Map());
@@ -89,6 +88,11 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
   const [roomSyncError, setRoomSyncError] = useState<string | null>(null);
   const [isRequestingMedia, setIsRequestingMedia] = useState(false);
   const [myGoal, setMyGoal] = useState(initialGoal);
+
+  useEffect(() => {
+    displayNameRef.current = displayName;
+    initialGoalRef.current = initialGoal;
+  }, [displayName, initialGoal]);
 
   const updateParticipants = useCallback(() => {
     setParticipants(new Map(participantsRef.current));
@@ -103,7 +107,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
 
     setMediaError(null);
 
-    const useStream = (stream: MediaStream, errorMessage: string | null = null) => {
+    const createStream = (stream: MediaStream, errorMessage: string | null = null) => {
       stream.getAudioTracks().forEach((track) => {
         track.enabled = false;
       });
@@ -123,13 +127,13 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
         video: VIDEO_CONSTRAINTS,
         audio: AUDIO_CONSTRAINTS,
       });
-      return useStream(stream);
-    } catch (err: any) {
+      return createStream(stream);
+    } catch (err: unknown) {
       console.warn('getUserMedia error:', err);
       let videoError: unknown = null;
       try {
         const videoOnly = await navigator.mediaDevices.getUserMedia({ video: true });
-        return useStream(videoOnly, 'Camera is available, but the microphone could not be opened. Allow microphone access and retry.');
+        return createStream(videoOnly, 'Camera is available, but the microphone could not be opened. Allow microphone access and retry.');
       } catch (fallbackError) {
         videoError = fallbackError;
       }
@@ -137,7 +141,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
       let audioError: unknown = null;
       try {
         const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
-        return useStream(audioOnly, 'Microphone is available, but the camera could not be opened. Allow camera access and retry.');
+        return createStream(audioOnly, 'Microphone is available, but the camera could not be opened. Allow camera access and retry.');
       } catch (fallbackError) {
         audioError = fallbackError;
       }
@@ -176,23 +180,32 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
 
           if (isFirebaseConfigured && db && roomId) {
             const myRef = ref(db, `rooms/${roomId}/participants/${peerId}`);
+            const publicPresenceRef = ref(db, `publicRooms/${roomId}/${peerId}`);
             const localStream = localStreamRef.current;
-            set(myRef, {
+            const participantData = {
               name: displayNameRef.current || 'Anonymous',
               muted: localStream?.getAudioTracks().every((track) => !track.enabled) ?? true,
               cameraOff: !localStream?.getVideoTracks().some((track) => track.readyState === 'live' && track.enabled),
               hasMedia: Boolean(localStream?.getTracks().some((track) => track.readyState === 'live')),
               goal: initialGoalRef.current || '',
               joinedAt: Date.now(),
-            }).catch((error) => {
-              console.warn('Could not register room participant:', error);
-              setRoomSyncError('Firebase denied access to this room. Its Realtime Database rules must allow reads and writes under /rooms.');
-            });
+            };
 
-            // Clean up upon connection drop
-            onDisconnect(myRef).remove().catch((error) => {
-              console.warn('Could not register participant cleanup:', error);
-            });
+            // Register disconnect cleanup before writing presence so a dropped tab cannot leave a stale count.
+            onDisconnect(myRef)
+              .remove()
+              .then(() => set(myRef, participantData))
+              .catch((error) => {
+                console.warn('Could not register room participant:', error);
+                setRoomSyncError('Firebase denied access to this room. Its Realtime Database rules must allow reads and writes under /rooms.');
+              });
+
+            onDisconnect(publicPresenceRef)
+              .remove()
+              .then(() => set(publicPresenceRef, true))
+              .catch((error) => {
+                console.warn('Could not register public room presence:', error);
+              });
 
             // Listen for other room participants
             const participantsDbRef = ref(db, `rooms/${roomId}/participants`);
@@ -246,7 +259,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
                         updateParticipants();
                       });
 
-                      call.on('error', (callErr: any) => {
+                      call.on('error', (callErr) => {
                         console.warn('Call error with peer:', remoteId, callErr);
                         if (connectionsRef.current.get(remoteId) !== call) return;
                         participantsRef.current.delete(remoteId);
@@ -288,7 +301,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
         });
 
         // Answer incoming calls
-        peer.on('call', (call: any) => {
+        peer.on('call', (call: MediaConnection) => {
           const remotePeerId = call.peer;
           const previousConnection = connectionsRef.current.get(remotePeerId);
           if (previousConnection && previousConnection !== call) {
@@ -339,7 +352,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
             updateParticipants();
           });
 
-          call.on('error', (callError: any) => {
+          call.on('error', (callError) => {
             console.warn('Incoming call failed:', remotePeerId, callError);
             if (connectionsRef.current.get(remotePeerId) !== call) return;
             participantsRef.current.delete(remotePeerId);
@@ -356,7 +369,7 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
           }
         });
 
-        peer.on('error', (err: any) => {
+        peer.on('error', (err) => {
           console.warn('PeerJS event:', err.type, err.message);
         });
       } catch (err) {
@@ -377,7 +390,10 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
         participantUnsubscribeRef.current = null;
 
         if (oldPeerId && isFirebaseConfigured && db && roomId) {
-          await remove(ref(db, `rooms/${roomId}/participants/${oldPeerId}`)).catch(console.warn);
+          await Promise.all([
+            remove(ref(db, `rooms/${roomId}/participants/${oldPeerId}`)),
+            remove(ref(db, `publicRooms/${roomId}/${oldPeerId}`)),
+          ]).catch(console.warn);
         }
 
         peerRef.current = null;
@@ -535,6 +551,39 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
     }
   }, [isCameraOff, roomId, myPeerId, requestMedia]);
 
+  const revertToCamera = useCallback(async () => {
+    try {
+      let camTrack = originalCamTrackRef.current;
+      if (!camTrack || camTrack.readyState === 'ended') {
+        const freshStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        camTrack = freshStream.getVideoTracks()[0] ?? null;
+        originalCamTrackRef.current = camTrack;
+      }
+
+      // Replace track on all peer connections
+      for (const conn of connectionsRef.current.values()) {
+        const pc = conn.peerConnection as RTCPeerConnection;
+        const sender = pc?.getSenders().find((item) => item.track?.kind === 'video');
+        if (sender && camTrack) await sender.replaceTrack(camTrack);
+      }
+
+      // Update local preview
+      if (localStreamRef.current && camTrack) {
+        localStreamRef.current.getVideoTracks().forEach((track) => localStreamRef.current?.removeTrack(track));
+        localStreamRef.current.addTrack(camTrack);
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+      }
+
+      const screenTrack = screenVideoTrackRef.current;
+      screenVideoTrackRef.current = null;
+      if (screenTrack && screenTrack.readyState !== 'ended') screenTrack.stop();
+      setIsScreenSharing(false);
+    } catch (error) {
+      console.warn('Reverting to camera stream error:', error);
+      setIsScreenSharing(false);
+    }
+  }, []);
+
   // Toggle Screen Sharing
   const toggleScreenShare = useCallback(async () => {
     if (!isScreenSharing) {
@@ -546,9 +595,11 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
 
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: true,
-          audio: true,
+          audio: false,
         });
         const screenVideoTrack = screenStream.getVideoTracks()[0];
+        if (!screenVideoTrack) return;
+        screenVideoTrackRef.current = screenVideoTrack;
 
         // Replace track across all peer connections
         for (const conn of connectionsRef.current.values()) {
@@ -574,53 +625,18 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
         setIsScreenSharing(true);
 
         // When user stops screen sharing via browser native bar
-        screenVideoTrack.onended = async () => {
-          await revertToCamera();
+        screenVideoTrack.onended = () => {
+          void revertToCamera();
         };
-      } catch (err: any) {
-        if (err.name !== 'NotAllowedError') {
-          console.error('Screen sharing error:', err);
+      } catch (error: unknown) {
+        if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') {
+          console.error('Screen sharing error:', error);
         }
       }
     } else {
       await revertToCamera();
     }
-  }, [isScreenSharing]);
-
-  const revertToCamera = async () => {
-    try {
-      let camTrack = originalCamTrackRef.current;
-      if (!camTrack || camTrack.readyState === 'ended') {
-        const freshStream = await navigator.mediaDevices.getUserMedia({ video: true });
-        camTrack = freshStream.getVideoTracks()[0];
-        originalCamTrackRef.current = camTrack;
-      }
-
-      // Replace track on all peer connections
-      for (const conn of connectionsRef.current.values()) {
-        const pc = conn.peerConnection as RTCPeerConnection;
-        if (pc) {
-          const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
-          if (sender && camTrack) {
-            await sender.replaceTrack(camTrack);
-          }
-        }
-      }
-
-      // Update local preview
-      if (localStreamRef.current && camTrack) {
-        const currentTracks = localStreamRef.current.getVideoTracks();
-        currentTracks.forEach((t) => localStreamRef.current?.removeTrack(t));
-        localStreamRef.current.addTrack(camTrack);
-        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-      }
-
-      setIsScreenSharing(false);
-    } catch (e) {
-      console.warn('Reverting to camera stream error:', e);
-      setIsScreenSharing(false);
-    }
-  };
+  }, [isScreenSharing, revertToCamera]);
 
   // Set active goal
   const setGoal = useCallback(
@@ -636,7 +652,10 @@ export function useWebRTC(roomId: string, displayName: string, initialGoal: stri
   // Leave Room
   const leaveRoom = useCallback(() => {
     if (isFirebaseConfigured && db && roomId && myPeerId) {
-      remove(ref(db, `rooms/${roomId}/participants/${myPeerId}`)).catch(console.warn);
+      Promise.all([
+        remove(ref(db, `rooms/${roomId}/participants/${myPeerId}`)),
+        remove(ref(db, `publicRooms/${roomId}/${myPeerId}`)),
+      ]).catch(console.warn);
     }
 
     if (peerRef.current) {

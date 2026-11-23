@@ -1,5 +1,14 @@
 {
   "rules": {
+    "publicRooms": {
+      ".read": true,
+      "$roomId": {
+        "$peerId": {
+          ".write": true,
+          ".validate": "newData.val() === true"
+        }
+      }
+    },
     "rooms": {
       "$roomId": {
         ".read": true,

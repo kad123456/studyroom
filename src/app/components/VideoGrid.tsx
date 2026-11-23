@@ -154,7 +154,7 @@ export default function VideoGrid({
           <div className="col-span-full mt-3 flex justify-center pointer-events-auto">
             <div className="glass px-4 py-2.5 rounded-2xl flex items-center gap-3 text-xs text-slate-300 max-w-md shadow-lg border border-purple-500/20">
               <Users className="w-4 h-4 text-purple-400 flex-shrink-0" />
-              <span>You're the only one here right now. Invite friends to focus with you!</span>
+              <span>You&apos;re the only one here right now. Invite friends to focus with you!</span>
               <button
                 onClick={copyInvite}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-medium transition-all shadow-sm flex-shrink-0"

@@ -21,46 +21,52 @@ export function useTasks(roomId: string, myPeerId: string, displayName: string) 
     if (!isFirebaseConfigured || !db) {
       // Local initial tasks in preview mode
       const saved = sessionStorage.getItem(`tasks_${roomId}`);
-      if (saved) {
-        try {
-          setTasks(JSON.parse(saved));
-        } catch {
-          // ignore
+      const timeout = window.setTimeout(() => {
+        if (saved) {
+          try {
+            const parsed: unknown = JSON.parse(saved);
+            if (Array.isArray(parsed)) setTasks(parsed as Task[]);
+          } catch {
+            // Ignore invalid local task data.
+          }
+        } else {
+          setTasks([
+            {
+              id: 'task-1',
+              text: 'Finish chapter 3 revision 📖',
+              done: false,
+              ownerId: myPeerId || 'local',
+              ownerName: displayName || 'You',
+              timestamp: Date.now() - 360000,
+            },
+            {
+              id: 'task-2',
+              text: 'Write notes for tomorrow\'s test ✍️',
+              done: true,
+              ownerId: myPeerId || 'local',
+              ownerName: displayName || 'You',
+              timestamp: Date.now() - 720000,
+            },
+          ]);
         }
-      } else {
-        setTasks([
-          {
-            id: 'task-1',
-            text: 'Finish chapter 3 revision 📖',
-            done: false,
-            ownerId: myPeerId || 'local',
-            ownerName: displayName || 'You',
-            timestamp: Date.now() - 360000,
-          },
-          {
-            id: 'task-2',
-            text: 'Write notes for tomorrow\'s test ✍️',
-            done: true,
-            ownerId: myPeerId || 'local',
-            ownerName: displayName || 'You',
-            timestamp: Date.now() - 720000,
-          },
-        ]);
-      }
-      return;
+      }, 0);
+      return () => window.clearTimeout(timeout);
     }
 
     const tasksRef = ref(db, `rooms/${roomId}/tasks`);
     const unsubscribe = onValue(tasksRef, (snapshot) => {
       const data = snapshot.val() || {};
-      const list: Task[] = Object.entries(data).map(([id, val]: [string, any]) => ({
-        id,
-        text: val.text || '',
-        done: Boolean(val.done),
-        ownerId: val.ownerId || '',
-        ownerName: val.ownerName || 'Participant',
-        timestamp: val.timestamp || Date.now(),
-      })).sort((a, b) => a.timestamp - b.timestamp);
+      const list: Task[] = Object.entries(data).map(([id, value]) => {
+        const val = value as Partial<Task>;
+        return {
+          id,
+          text: val.text || '',
+          done: Boolean(val.done),
+          ownerId: val.ownerId || '',
+          ownerName: val.ownerName || 'Participant',
+          timestamp: val.timestamp || Date.now(),
+        };
+      }).sort((a, b) => a.timestamp - b.timestamp);
 
       setTasks(list);
     });
@@ -70,7 +76,7 @@ export function useTasks(roomId: string, myPeerId: string, displayName: string) 
 
   const saveLocal = (updated: Task[]) => {
     setTasks(updated);
-    if (!isFirebaseConfigured) {
+    if (!isFirebaseConfigured || !db) {
       sessionStorage.setItem(`tasks_${roomId}`, JSON.stringify(updated));
     }
   };
